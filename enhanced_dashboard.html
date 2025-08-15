@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cover Crop Explorer — Enhanced with Polygons</title>
+
+  <!-- MapLibre GL -->
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+
+  <!-- deck.gl (UMD) -->
+  <script src="https://unpkg.com/deck.gl@8.9.36/dist.min.js"></script>
+
+  <!-- PapaParse for CSV loading -->
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <!-- Plotly for charts -->
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+
+  <style>
+    :root {
+      --panel-w: 360px;
+      --ui-bg: #0f172a; /* slate-900 */
+      --ui-fg: #e2e8f0; /* slate-200 */
+      --chip-bg: #1e293b; /* slate-800 */
+      --accent: #38bdf8; /* sky-400 */
+    }
+    html, body { height: 100%; margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #app { position: fixed; inset: 0; display: grid; grid-template-columns: var(--panel-w) 1fr; }
+    #panel { background: var(--ui-bg); color: var(--ui-fg); border-right: 1px solid #0b1220; padding: 14px 14px 18px; overflow: auto; }
+    #map { position: relative; }
+    #map #maplibre { position: absolute; inset: 0; }
+
+    h1 { font-size: 18px; margin: 6px 0 10px; letter-spacing: 0.2px; }
+    .subtle { color: #94a3b8; font-size: 12px; margin-top: -4px; margin-bottom: 8px; }
+    fieldset { border: 1px solid #0b1220; border-radius: 12px; padding: 10px 12px; margin: 0 0 12px; }
+    legend { color: #cbd5e1; font-size: 12px; padding: 0 6px; }
+
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+    .ctrl { margin: 6px 0; }
+    .ctrl label { font-size: 13px; }
+    input[type="range"] { width: 100%; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip { background: var(--chip-bg); border-radius: 10px; padding: 6px 8px; font-size: 12px; }
+    .muted { color: #94a3b8; }
+    .btn { background:#111827; border:1px solid #0b1220; color:#e5e7eb; border-radius:10px; padding:8px 10px; font-size:12px; cursor:pointer; }
+    .btn:hover { border-color:#1f2937; }
+    .btn:active { transform: translateY(1px); }
+
+    #stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+    #stats .stat { background: var(--chip-bg); border-radius: 10px; padding: 8px; font-size: 12px; }
+    #stats .k { color:#94a3b8; font-size:11px; }
+    #stats .v { font-weight:600; font-size:14px; }
+
+    #details { background: #0b1220; border-radius: 12px; padding: 8px; }
+    #plot { width: 100%; height: 180px; }
+
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    /* Map attribution tidy */
+    .maplibregl-ctrl-bottom-right { bottom: 6px; right: 6px; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <aside id="panel">
+    <h1>Cover Crop Explorer</h1>
+    <div class="subtle">Polygon-based orchard visualization with time controls and cluster role colors.</div>
+
+    <fieldset>
+      <legend>Status</legend>
+      <div id="loadStatus" class="subtle">Loading data...</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Time</legend>
+      <div class="row">
+        <div><div id="seasonLabel" style="font-weight:600;">Season: —</div>
+          <div class="subtle" id="seasonDate">—</div>
+        </div>
+        <div><button id="playBtn" class="btn">▶︎</button></div>
+      </div>
+      <input id="seasonSlider" type="range" min="0" max="0" step="1" value="0"/>
+    </fieldset>
+
+    <fieldset>
+      <legend>Filters</legend>
+      <div class="ctrl"><label><input type="checkbox" id="chkYoung" checked/> Show Young</label></div>
+      <div class="ctrl"><label><input type="checkbox" id="chkMid" checked/> Show Mid</label></div>
+      <div class="ctrl"><label><input type="checkbox" id="chkFlip"/> Flipped this season</label></div>
+    </fieldset>
+
+    <div id="stats">
+      <div class="stat"><div class="k">Active</div><div class="v" id="statActive">0</div></div>
+      <div class="stat"><div class="k">Mixed</div><div class="v" id="statMixed">0</div></div>
+      <div class="stat"><div class="k">Baseline</div><div class="v" id="statBaseline">0</div></div>
+      <div class="stat"><div class="k">Flipped</div><div class="v" id="statFlipped">0</div></div>
+    </div>
+
+    <div id="details">
+      <div id="info" class="subtle">Click an orchard to see its history.</div>
+      <div id="plot"></div>
+    </div>
+
+    <div style="margin-top:10px; font-size:11px; color:#94a3b8;">
+      Colors: <span style="color:#2ca25f;">Active</span>, <span style="color:#6a51a3;">Mixed</span>, <span style="color:#9ca3af;">Baseline</span>. 
+      Opacity based on confidence.
+    </div>
+  </aside>
+
+  <main id="map">
+    <div id="maplibre"></div>
+  </main>
+</div>
+
+<script>
+// ============================
+// CONFIG & Global State
+// ============================
+let map, overlay;
+let csvRows = [];
+let orchardGeojson = null;
+let seasons = [];
+let seasonKeyBySort = new Map();
+let rowsByOrch = new Map();
+let animation = null;
+
+// Utility: parse HEX -> [r,g,b,a]
+function hexToRgb(hex, alpha = 255) {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || '#808080');
+  return m ? [parseInt(m[1],16), parseInt(m[2],16), parseInt(m[3],16), alpha] : [128,128,128,alpha];
+}
+
+function updateStatus(msg) {
+  document.getElementById('loadStatus').textContent = msg;
+}
+
+function initMap() {
+  map = new maplibregl.Map({
+    container: 'maplibre',
+    style: 'https://demotiles.maplibre.org/style.json',
+    center: [-120.5, 36.5],
+    zoom: 8,
+    hash: true
+  });
+
+  overlay = new deck.MapboxOverlay({ layers: [] });
+  map.addControl(overlay);
+}
+
+async function loadData() {
+  try {
+    updateStatus('Loading orchard polygons...');
+    const geoResponse = await fetch('./FresnoAlmondOrchards.geojson');
+    orchardGeojson = await geoResponse.json();
+    updateStatus(`Loaded ${orchardGeojson.features.length} orchard polygons`);
+
+    updateStatus('Loading CSV data...');
+    const csvResponse = await fetch('./viz_table.csv');
+    const csvText = await csvResponse.text();
+    const parsedCSV = Papa.parse(csvText, { header: true, dynamicTyping: true, skipEmptyLines: true });
+    
+    preprocessCSV(parsedCSV.data);
+    updateStatus(`Ready! ${csvRows.length} data records, ${seasons.length} seasons`);
+    
+    updateLayers();
+  } catch (error) {
+    updateStatus(`Error: ${error.message}`);
+    console.error('Loading error:', error);
+  }
+}
+
+function preprocessCSV(rows) {
+  // Parse and normalize CSV data
+  csvRows = rows.map(r => ({
+    ...r,
+    orch_id: String(r.orch_id),
+    colorRGB: hexToRgb(r.cluster_role_color, 180), // Semi-transparent
+    flipped_this_season: Number(r.time_since_last_flip) === 0,
+  }));
+
+  // Build seasons
+  seasons = Array.from(new Set(csvRows.map(r => r.season_sort))).sort((a,b)=>a-b);
+  seasonKeyBySort = new Map(csvRows.map(r => [r.season_sort, r.season]));
+
+  // Group by orchard for charting
+  rowsByOrch = new Map();
+  for (const r of csvRows) {
+    if (!rowsByOrch.has(r.orch_id)) rowsByOrch.set(r.orch_id, []);
+    rowsByOrch.get(r.orch_id).push(r);
+  }
+  for (const [id, arr] of rowsByOrch) arr.sort((a,b)=>a.season_sort - b.season_sort);
+
+  // Set slider
+  const slider = document.getElementById('seasonSlider');
+  slider.min = 0; slider.max = seasons.length - 1; slider.value = seasons.length - 1;
+  updateSeasonLabels();
+}
+
+function getFilters() {
+  const showYoung = document.getElementById('chkYoung').checked;
+  const showMid   = document.getElementById('chkMid').checked;
+  const onlyFlip  = document.getElementById('chkFlip').checked;
+  const idx = Number(document.getElementById('seasonSlider').value);
+  const seasonSort = seasons[idx];
+  return { showYoung, showMid, onlyFlip, seasonSort };
+}
+
+function filteredRows() {
+  const { showYoung, showMid, onlyFlip, seasonSort } = getFilters();
+  return csvRows.filter(r => (
+    r.season_sort === seasonSort &&
+    ((showYoung && r.stratum === 'Young') || (showMid && r.stratum === 'Mid')) &&
+    (!onlyFlip || r.flipped_this_season)
+  ));
+}
+
+function makeLayer() {
+  if (!orchardGeojson) return null;
+  
+  const rows = filteredRows();
+  const dataByOrchId = new Map(rows.map(r => [r.orch_id, r]));
+  
+  // Stats - count from CSV data
+  const nActive = rows.filter(d => d.cluster_role === 'Active').length;
+  const nMixed  = rows.filter(d => d.cluster_role === 'Mixed').length;
+  const nBase   = rows.filter(d => d.cluster_role === 'Baseline').length;
+  const nFlip   = rows.filter(d => d.flipped_this_season).length;
+  document.getElementById('statActive').textContent = nActive.toLocaleString();
+  document.getElementById('statMixed').textContent  = nMixed.toLocaleString();
+  document.getElementById('statBaseline').textContent = nBase.toLocaleString();
+  document.getElementById('statFlipped').textContent = nFlip.toLocaleString();
+
+  // Match CSV data using feature.properties.orch_id instead of feature.id
+  const enhancedGeojson = {
+    ...orchardGeojson,
+    features: orchardGeojson.features.map(feature => {
+      // Use the orch_id property for matching
+      const csvData = dataByOrchId.get(feature.properties.orch_id);
+      
+      if (csvData) {
+        return {
+          ...feature,
+          properties: {
+            ...feature.properties,
+            ...csvData // Merge CSV data into properties
+          }
+        };
+      } else {
+        // Show orchards without CSV data in gray
+        return {
+          ...feature,
+          properties: {
+            ...feature.properties,
+            colorRGB: [200, 200, 200, 100] // Gray for unmatched orchards
+          }
+        };
+      }
+    })
+  };
+
+  const layer = new deck.GeoJsonLayer({
+    id: 'orchards-polygons',
+    data: enhancedGeojson,
+    pickable: true,
+    stroked: true,
+    filled: true,
+    extruded: false,
+    lineWidthScale: 1,
+    lineWidthMinPixels: 1,
+    getFillColor: f => f.properties.colorRGB || [128, 128, 128, 100],
+    getLineColor: [255, 255, 255, 80],
+    getLineWidth: 1,
+    opacity: 0.8,
+    onClick: info => info && showDetails(info.object.properties)
+  });
+
+  return layer;
+}
+
+function updateLayers() {
+  const layer = makeLayer();
+  if (layer) {
+    overlay.setProps({ layers: [layer] });
+  }
+}
+
+function updateSeasonLabels() {
+  const idx = Number(document.getElementById('seasonSlider').value);
+  const seasonSort = seasons[idx];
+  const season = seasonKeyBySort.get(seasonSort) || String(seasonSort);
+  document.getElementById('seasonLabel').textContent = `Season: ${season}`;
+  document.getElementById('seasonDate').textContent = `Midpoint ~ Jan 31, ${String(season).split('_')[1] || ''}`;
+}
+
+function showDetails(props) {
+  const info = document.getElementById('info');
+  info.innerHTML = `
+    <div style="font-size:12px; color:#cbd5e1; margin-bottom:6px;">Orchard <span class="code">${props.orch_id}</span></div>
+    <div class="chips">
+      <div class="chip">Stratum: <b>${props.stratum || 'N/A'}</b></div>
+      <div class="chip">Role: <b style="color:${props.cluster_role_color}">${props.cluster_role || 'N/A'}</b></div>
+      <div class="chip">Acres: <b>${props.ACRES}</b></div>
+      <div class="chip">County: <b>${props.CNTY}</b></div>
+    </div>
+  `;
+
+  // Show time series if available
+  if (props.orch_id && rowsByOrch.has(props.orch_id)) {
+    const series = rowsByOrch.get(props.orch_id);
+    const xs = series.map(s => s.season);
+    const ys = series.map(s => s.best_soft_norm);
+    const colors = series.map(s => s.cluster_role_color);
+
+    const trace = {
+      type: 'scatter', mode: 'lines+markers',
+      x: xs, y: ys,
+      marker: { size: 8, color: colors },
+      line: { shape: 'linear' }
+    };
+    Plotly.react('plot', [trace], {
+      margin: { l: 28, r: 8, b: 26, t: 8 },
+      xaxis: { tickfont: { size: 10 } },
+      yaxis: { title: 'best_soft_norm', zeroline: true, rangemode: 'tozero' },
+      displayModeBar: false
+    }, { responsive: true });
+  }
+}
+
+// Event wiring
+function onUIChange() { updateSeasonLabels(); updateLayers(); }
+
+function togglePlay() {
+  const btn = document.getElementById('playBtn');
+  if (animation) {
+    cancelAnimationFrame(animation); animation = null; btn.textContent = '▶︎'; return;
+  }
+  btn.textContent = '❚❚';
+  const slider = document.getElementById('seasonSlider');
+  const loop = () => {
+    const max = Number(slider.max);
+    let v = Number(slider.value);
+    v = (v >= max) ? 0 : v + 1;
+    slider.value = v; onUIChange();
+    animation = requestAnimationFrame(() => setTimeout(loop, 700));
+  };
+  loop();
+}
+
+['seasonSlider','chkYoung','chkMid','chkFlip'].forEach(id => {
+  document.getElementById(id).addEventListener('input', onUIChange);
+});
+
+document.getElementById('playBtn').addEventListener('click', togglePlay);
+
+// Initialize
+initMap();
+loadData();
+</script>
+</body>
+</html>

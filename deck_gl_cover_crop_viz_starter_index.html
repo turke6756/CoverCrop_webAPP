@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cover Crop Explorer — deck.gl starter</title>
+
+  <!-- MapLibre GL -->
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+
+  <!-- deck.gl (UMD) -->
+  <script src="https://unpkg.com/deck.gl@8.9.36/dist.min.js"></script>
+
+  <!-- PapaParse for CSV loading -->
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <!-- Plotly for charts -->
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+
+  <style>
+    :root {
+      --panel-w: 360px;
+      --ui-bg: #0f172a; /* slate-900 */
+      --ui-fg: #e2e8f0; /* slate-200 */
+      --chip-bg: #1e293b; /* slate-800 */
+      --accent: #38bdf8; /* sky-400 */
+    }
+    html, body { height: 100%; margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #app { position: fixed; inset: 0; display: grid; grid-template-columns: var(--panel-w) 1fr; }
+    #panel { background: var(--ui-bg); color: var(--ui-fg); border-right: 1px solid #0b1220; padding: 14px 14px 18px; overflow: auto; }
+    #map { position: relative; }
+    #map #maplibre { position: absolute; inset: 0; }
+
+    h1 { font-size: 18px; margin: 6px 0 10px; letter-spacing: 0.2px; }
+    .subtle { color: #94a3b8; font-size: 12px; margin-top: -4px; margin-bottom: 8px; }
+    fieldset { border: 1px solid #0b1220; border-radius: 12px; padding: 10px 12px; margin: 0 0 12px; }
+    legend { color: #cbd5e1; font-size: 12px; padding: 0 6px; }
+
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+    .ctrl { margin: 6px 0; }
+    .ctrl label { font-size: 13px; }
+    input[type="range"] { width: 100%; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip { background: var(--chip-bg); border-radius: 10px; padding: 6px 8px; font-size: 12px; }
+    .muted { color: #94a3b8; }
+    .btn { background:#111827; border:1px solid #0b1220; color:#e5e7eb; border-radius:10px; padding:8px 10px; font-size:12px; cursor:pointer; }
+    .btn:hover { border-color:#1f2937; }
+    .btn:active { transform: translateY(1px); }
+
+    #stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+    #stats .stat { background: var(--chip-bg); border-radius: 10px; padding: 8px; font-size: 12px; }
+    #stats .k { color:#94a3b8; font-size:11px; }
+    #stats .v { font-weight:600; font-size:14px; }
+
+    #details { background: #0b1220; border-radius: 12px; padding: 8px; }
+    #plot { width: 100%; height: 180px; }
+
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    /* Map attribution tidy */
+    .maplibregl-ctrl-bottom-right { bottom: 6px; right: 6px; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <aside id="panel">
+    <h1>Cover Crop Explorer</h1>
+    <div class="subtle">Time‑scrubbable orchard roles with confidence‑scaled opacity.</div>
+
+    <fieldset>
+      <legend>Data</legend>
+      <div class="ctrl" style="display:flex; gap:8px; align-items:center;">
+        <label class="btn" for="csvFile">Load <span class="code">viz_table.csv</span></label>
+        <input id="csvFile" type="file" accept=".csv" style="display:none;"/>
+        <label class="btn" for="geoFile">Load centroids <span class="code">.geojson</span></label>
+        <input id="geoFile" type="file" accept=".geojson,.json" style="display:none;"/>
+      </div>
+      <div class="ctrl" style="font-size:12px;">
+        Or set paths in <span class="code">CONFIG</span> (top of script) and serve this folder (e.g. <span class="code">python -m http.server</span>).
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Time</legend>
+      <div class="row">
+        <div><div id="seasonLabel" style="font-weight:600;">Season: —</div>
+          <div class="subtle" id="seasonDate">—</div>
+        </div>
+        <div><button id="playBtn" class="btn">▶︎</button></div>
+      </div>
+      <input id="seasonSlider" type="range" min="0" max="0" step="1" value="0"/>
+    </fieldset>
+
+    <fieldset>
+      <legend>Filters</legend>
+      <div class="ctrl"><label><input type="checkbox" id="chkYoung" checked/> Show Young</label></div>
+      <div class="ctrl"><label><input type="checkbox" id="chkMid" checked/> Show Mid</label></div>
+      <div class="ctrl"><label><input type="checkbox" id="chkFlip"/> Flipped this season</label></div>
+    </fieldset>
+
+    <div id="stats">
+      <div class="stat"><div class="k">Active</div><div class="v" id="statActive">0</div></div>
+      <div class="stat"><div class="k">Mixed</div><div class="v" id="statMixed">0</div></div>
+      <div class="stat"><div class="k">Baseline</div><div class="v" id="statBaseline">0</div></div>
+      <div class="stat"><div class="k">Flipped</div><div class="v" id="statFlipped">0</div></div>
+    </div>
+
+    <div id="details">
+      <div id="info" class="subtle">Click an orchard to see its history.</div>
+      <div id="plot"></div>
+    </div>
+
+    <div style="margin-top:10px; font-size:11px; color:#94a3b8;">
+      Colors: <span style="color:#2ca25f;">Active</span>, <span style="color:#6a51a3;">Mixed</span>, <span style="color:#9ca3af;">Baseline</span>. Opacity scales with <span class="code">best_soft_norm</span> (p10→p90 in stratum×season).
+    </div>
+  </aside>
+
+  <main id="map">
+    <div id="maplibre"></div>
+  </main>
+</div>
+
+<script>
+// ============================
+// 🔧 CONFIG — set URLs here
+// ============================
+const CONFIG = {
+  // If you put files next to index.html, set to relative paths:
+  // csvUrl: "./viz_table.csv",
+  // centroidsUrl: "./orchards_centroids.geojson",
+  csvUrl: "./viz_table.csv",
+  centroidsUrl: "./FresnoAlmondOrchards.geojson",
+
+  // Initial map view (adjust to your AOI)
+  initialView: { center: [-120.5, 36.5], zoom: 7.3 },
+
+  // Scatter radius in screen pixels (auto scaled by zoom)
+  radiusMin: 3,
+  radiusMax: 12
+};
+
+// ============================
+// Global state
+// ============================
+let map, overlay;                // MapLibre + deck overlay
+let csvRows = [];                // all rows from viz_table.csv
+let centroidsById = new Map();   // orch_id -> [lon, lat]
+let seasons = [];                // unique season_sort ints
+let seasonKeyBySort = new Map(); // season_sort -> season string
+let rowsByOrch = new Map();      // orch_id -> [{...row}*] across seasons
+let animation = null;            // requestAnimationFrame handle
+
+// Utility: parse HEX -> [r,g,b]
+function hexToRgb(hex) {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || '#808080');
+  return m ? [parseInt(m[1],16), parseInt(m[2],16), parseInt(m[3],16)] : [128,128,128];
+}
+
+function initMap() {
+  map = new maplibregl.Map({
+    container: 'maplibre',
+    style: 'https://demotiles.maplibre.org/style.json',
+    center: CONFIG.initialView.center,
+    zoom: CONFIG.initialView.zoom,
+    hash: true
+  });
+
+  overlay = new deck.MapboxOverlay({ layers: [] });
+  map.addControl(overlay);
+}
+
+function loadCSVFromFile(file) {
+  return new Promise((resolve, reject) => {
+    Papa.parse(file, {
+      header: true,
+      dynamicTyping: true,
+      skipEmptyLines: true,
+      complete: (res) => resolve(res.data),
+      error: reject
+    });
+  });
+}
+
+async function loadCSVFromUrl(url) {
+  const resp = await fetch(url);
+  const text = await resp.text();
+  return new Promise((resolve) => {
+    Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true, complete: r => resolve(r.data) });
+  });
+}
+
+async function loadGeoJSONFromFile(file) {
+  const text = await file.text();
+  return JSON.parse(text);
+}
+
+async function loadGeoJSONFromUrl(url) {
+  const resp = await fetch(url);
+  return await resp.json();
+}
+
+function indexCentroids(geojson) {
+  // Expect FeatureCollection with Point geometries and an 'orch_id' property
+  for (const f of geojson.features || []) {
+    const id = f.properties?.orch_id ?? f.properties?.ORCH_ID ?? f.properties?.id;
+    if (!id) continue;
+    let coords = null;
+    if (f.geometry?.type === 'Point') coords = f.geometry.coordinates;
+    else if (f.geometry?.type === 'Polygon' || f.geometry?.type === 'MultiPolygon') {
+      // Best-effort centroid for polygons
+      coords = polygonCentroid(f.geometry);
+    }
+    if (coords && Number.isFinite(coords[0]) && Number.isFinite(coords[1])) {
+      centroidsById.set(String(id), coords);
+    }
+  }
+}
+
+function polygonCentroid(geom) {
+  // Simple area-weighted centroid for Polygon / MultiPolygon in lon/lat
+  function ringCentroid(coords) {
+    let x = 0, y = 0, a = 0;
+    const pts = coords[0]; // outer ring only
+    for (let i=0, j=pts.length-1; i<pts.length; j=i++) {
+      const [x0,y0] = pts[j];
+      const [x1,y1] = pts[i];
+      const f = x0*y1 - x1*y0; a += f; x += (x0 + x1) * f; y += (y0 + y1) * f;
+    }
+    a *= 0.5;
+    if (a === 0) return pts[0];
+    return [x/(6*a), y/(6*a)];
+  }
+  if (geom.type === 'Polygon') return ringCentroid(geom.coordinates);
+  if (geom.type === 'MultiPolygon') {
+    // pick the largest polygon by area
+    let best = null, bestA = -Infinity;
+    for (const poly of geom.coordinates) {
+      const c = ringCentroid(poly);
+      // compute rough area again
+      const pts = poly[0]; let a=0;
+      for (let i=0, j=pts.length-1; i<pts.length; j=i++) { const [x0,y0]=pts[j],[x1,y1]=pts[i]; a += x0*y1 - x1*y0; }
+      a = Math.abs(a/2);
+      if (a > bestA) { bestA = a; best = c; }
+    }
+    return best;
+  }
+  return null;
+}
+
+function preprocessCSV(rows) {
+  // Ensure required columns exist
+  const required = [
+    'orch_id','season','season_mid','season_sort','stratum','cluster_role','cluster_role_color',
+    'best_soft','best_soft_norm','alpha_0_1','alpha_0_100','streak_len_current','time_since_last_flip',
+    'flip_style_last','delta_last','confidence','npts_total','env_z_season'
+  ];
+  for (const k of required) {
+    if (!rows.length || !(k in rows[0])) console.warn('Missing column in CSV:', k);
+  }
+
+  // Parse/normalize and build indexes
+  csvRows = rows.map(r => ({
+    ...r,
+    orch_id: String(r.orch_id),
+    colorRGB: hexToRgb(r.cluster_role_color),
+    alpha: Number(r.alpha_0_1) || 0.1,
+    flipped_this_season: Number(r.time_since_last_flip) === 0,
+  }));
+
+  // seasons & labels
+  seasons = Array.from(new Set(csvRows.map(r => r.season_sort))).sort((a,b)=>a-b);
+  seasonKeyBySort = new Map(csvRows.map(r => [r.season_sort, r.season]));
+
+  // rows by orchard for charting
+  rowsByOrch = new Map();
+  for (const r of csvRows) {
+    if (!rowsByOrch.has(r.orch_id)) rowsByOrch.set(r.orch_id, []);
+    rowsByOrch.get(r.orch_id).push(r);
+  }
+  for (const [id, arr] of rowsByOrch) arr.sort((a,b)=>a.season_sort - b.season_sort);
+
+  // Set slider domain
+  const slider = document.getElementById('seasonSlider');
+  slider.min = 0; slider.max = seasons.length - 1; slider.value = seasons.length - 1;
+  updateSeasonLabels();
+}
+
+function getFilters() {
+  const showYoung = document.getElementById('chkYoung').checked;
+  const showMid   = document.getElementById('chkMid').checked;
+  const onlyFlip  = document.getElementById('chkFlip').checked;
+  const idx = Number(document.getElementById('seasonSlider').value);
+  const seasonSort = seasons[idx];
+  return { showYoung, showMid, onlyFlip, seasonSort };
+}
+
+function filteredRows() {
+  const { showYoung, showMid, onlyFlip, seasonSort } = getFilters();
+  return csvRows.filter(r => (
+    r.season_sort === seasonSort &&
+    ((showYoung && r.stratum === 'Young') || (showMid && r.stratum === 'Mid')) &&
+    (!onlyFlip || r.flipped_this_season)
+  ));
+}
+
+function makeLayer() {
+  const rows = filteredRows();
+  // Join coordinates
+  const data = rows.map(r => {
+    const pos = centroidsById.get(r.orch_id);
+    return pos ? { ...r, position: pos } : null;
+  }).filter(Boolean);
+
+  // Stats panel
+  const nActive = data.filter(d => d.cluster_role === 'Active').length;
+  const nMixed  = data.filter(d => d.cluster_role === 'Mixed').length;
+  const nBase   = data.filter(d => d.cluster_role === 'Baseline').length;
+  const nFlip   = data.filter(d => d.flipped_this_season).length;
+  document.getElementById('statActive').textContent = nActive.toLocaleString();
+  document.getElementById('statMixed').textContent  = nMixed.toLocaleString();
+  document.getElementById('statBaseline').textContent = nBase.toLocaleString();
+  document.getElementById('statFlipped').textContent = nFlip.toLocaleString();
+
+  const layer = new deck.ScatterplotLayer({
+    id: 'orchards-points',
+    data,
+    pickable: true,
+    getPosition: d => d.position,
+    getFillColor: d => d.colorRGB,
+    getRadius: d => 6,
+    radiusUnits: 'pixels',
+    radiusMinPixels: CONFIG.radiusMin,
+    radiusMaxPixels: CONFIG.radiusMax,
+    opacity: 1.0,
+    getOpacity: d => Math.max(0.1, Math.min(1, Number(d.alpha) || 0.1)),
+    onClick: info => info && showDetails(info.object)
+  });
+
+  return layer;
+}
+
+function updateLayers() {
+  overlay.setProps({ layers: [makeLayer()] });
+}
+
+function updateSeasonLabels() {
+  const idx = Number(document.getElementById('seasonSlider').value);
+  const seasonSort = seasons[idx];
+  const season = seasonKeyBySort.get(seasonSort) || String(seasonSort);
+  document.getElementById('seasonLabel').textContent = `Season: ${season}`;
+  document.getElementById('seasonDate').textContent  = `Midpoint ~ Jan 31, ${String(season).split('_')[1] || ''}`;
+}
+
+function showDetails(row) {
+  const info = document.getElementById('info');
+  info.innerHTML = `
+    <div style="font-size:12px; color:#cbd5e1; margin-bottom:6px;">Orchard <span class="code">${row.orch_id}</span></div>
+    <div class="chips">
+      <div class="chip">Stratum: <b>${row.stratum}</b></div>
+      <div class="chip">Role: <b style="color:${row.cluster_role_color}">${row.cluster_role}</b></div>
+      <div class="chip">Fit (norm): <b>${Number(row.best_soft_norm).toFixed(2)}</b></div>
+      <div class="chip">Confidence: <b>${Number(row.confidence ?? 0).toFixed(2)}</b></div>
+      <div class="chip">N pts: <b>${row.npts_total}</b></div>
+      <div class="chip">Env z: <b>${Number(row.env_z_season).toFixed(2)}</b></div>
+      <div class="chip">Streak: <b>${row.streak_len_current}</b></div>
+      <div class="chip">Last flip: <b>${row.flip_style_last || '—'}</b> (Δ ${Number(row.delta_last||0).toFixed(2)})</div>
+    </div>
+  `;
+
+  const series = rowsByOrch.get(row.orch_id) || [];
+  const xs = series.map(s => s.season);
+  const ys = series.map(s => s.best_soft_norm);
+  const colors = series.map(s => s.cluster_role_color);
+
+  const trace = {
+    type: 'scatter', mode: 'lines+markers',
+    x: xs, y: ys,
+    marker: { size: 8, color: colors },
+    line: { shape: 'linear' }
+  };
+  Plotly.react('plot', [trace], {
+    margin: { l: 28, r: 8, b: 26, t: 8 },
+    xaxis: { tickfont: { size: 10 } },
+    yaxis: { title: 'best_soft_norm', zeroline: true, rangemode: 'tozero' },
+    displayModeBar: false
+  }, { responsive: true });
+}
+
+// ============================
+// Event wiring
+// ============================
+function onUIChange() { updateSeasonLabels(); updateLayers(); }
+
+function togglePlay() {
+  const btn = document.getElementById('playBtn');
+  if (animation) {
+    cancelAnimationFrame(animation); animation = null; btn.textContent = '▶︎'; return;
+  }
+  btn.textContent = '❚❚';
+  const slider = document.getElementById('seasonSlider');
+  const loop = () => {
+    const max = Number(slider.max);
+    let v = Number(slider.value);
+    v = (v >= max) ? 0 : v + 1;
+    slider.value = v; onUIChange();
+    animation = requestAnimationFrame(() => setTimeout(loop, 700));
+  };
+  loop();
+}
+
+// File inputs
+const csvInput = document.getElementById('csvFile');
+const geoInput = document.getElementById('geoFile');
+
+csvInput.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0]; if (!file) return;
+  const rows = await loadCSVFromFile(file); preprocessCSV(rows); updateLayers();
+});
+
+geoInput.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0]; if (!file) return;
+  const gj = await loadGeoJSONFromFile(file); indexCentroids(gj); updateLayers();
+});
+
+// Sliders & checkboxes
+['seasonSlider','chkYoung','chkMid','chkFlip'].forEach(id => {
+  document.getElementById(id).addEventListener('input', onUIChange);
+});
+
+document.getElementById('playBtn').addEventListener('click', togglePlay);
+
+// ============================
+// Boot
+// ============================
+initMap();
+
+// Optional: auto-load files from CONFIG
+(async function boot() {
+  try {
+    if (CONFIG.centroidsUrl) {
+      const gj = await loadGeoJSONFromUrl(CONFIG.centroidsUrl); indexCentroids(gj);
+    }
+    if (CONFIG.csvUrl) {
+      const rows = await loadCSVFromUrl(CONFIG.csvUrl); preprocessCSV(rows);
+    }
+    updateLayers();
+  } catch (err) { console.error(err); }
+})();
+</script>
+</body>
+</html>
