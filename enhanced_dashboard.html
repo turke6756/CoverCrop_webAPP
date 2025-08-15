@@ -334,21 +334,47 @@ function onUIChange() { updateSeasonLabels(); updateLayers(); }
 function togglePlay() {
   const btn = document.getElementById('playBtn');
   if (animation) {
-    cancelAnimationFrame(animation); animation = null; btn.textContent = '▶︎'; return;
+    // Stop playing
+    clearTimeout(animation);
+    animation = null;
+    btn.textContent = '▶︎';
+    return;
   }
+  
+  // Start playing
   btn.textContent = '❚❚';
   const slider = document.getElementById('seasonSlider');
+  
   const loop = () => {
+    if (!animation) return; // Stop if animation was cancelled
+    
     const max = Number(slider.max);
     let v = Number(slider.value);
     v = (v >= max) ? 0 : v + 1;
-    slider.value = v; onUIChange();
-    animation = requestAnimationFrame(() => setTimeout(loop, 700));
+    slider.value = v;
+    onUIChange();
+    
+    // Continue loop
+    animation = setTimeout(loop, 700);
   };
-  loop();
+  
+  // Start the loop
+  animation = setTimeout(loop, 700);
 }
 
-['seasonSlider','chkYoung','chkMid','chkFlip'].forEach(id => {
+// Handle manual slider input - stop animation when user scrubs manually
+document.getElementById('seasonSlider').addEventListener('input', (e) => {
+  // Stop animation if user manually moves slider
+  if (animation) {
+    clearTimeout(animation);
+    animation = null;
+    document.getElementById('playBtn').textContent = '▶︎';
+  }
+  onUIChange();
+});
+
+// Handle other controls
+['chkYoung','chkMid','chkFlip'].forEach(id => {
   document.getElementById(id).addEventListener('input', onUIChange);
 });
 
